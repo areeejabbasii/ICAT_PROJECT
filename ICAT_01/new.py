@@ -77,40 +77,113 @@ if tesseract_working:
 else:
     LANGUAGES = {'English': 'eng'}  # Fallback
 
+def preprocess_image(image):
+    """Apply various preprocessing techniques to improve OCR accuracy"""
+    # Convert PIL image to numpy array for OpenCV
+    img_array = np.array(image)
+    
+    # Convert RGB to BGR for OpenCV
+    if len(img_array.shape) == 3:
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+    
+    # Apply different preprocessing techniques
+    processed_images = []
+    
+    # 1. Original grayscale
+    processed_images.append(("Original", gray))
+    
+    # 2. Gaussian blur + OTSU threshold
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh1 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    processed_images.append(("OTSU Threshold", thresh1))
+    
+    # 3. Adaptive threshold
+    adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    processed_images.append(("Adaptive Threshold", adaptive_thresh))
+    
+    # 4. Morphological operations to clean up
+    kernel = np.ones((2,2), np.uint8)
+    morph = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
+    processed_images.append(("Morphological", morph))
+    
+    # 5. Contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    _, enhanced_thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    processed_images.append(("Enhanced Contrast", enhanced_thresh))
+    
+    # 6. Noise removal
+    denoised = cv2.medianBlur(gray, 3)
+    _, denoised_thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    processed_images.append(("Denoised", denoised_thresh))
+    
+    return processed_images
+
 def extract_text_from_image(image, languages):
-    """Extract text from image using OCR with specified languages"""
+    """Extract text from image using multiple preprocessing techniques and OCR configurations"""
     try:
-        # Convert PIL image to numpy array for OpenCV
-        img_array = np.array(image)
-        
-        # Convert RGB to BGR for OpenCV
-        if len(img_array.shape) == 3:
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        
-        # Preprocess image for better OCR results
-        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
-        
-        # Apply some image processing to improve OCR accuracy
-        # Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Threshold to get better contrast
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
         # Validate languages are available
         available_langs = get_available_languages()
         valid_languages = [lang for lang in languages if lang in available_langs]
         
         if not valid_languages:
-            return "Error: None of the selected languages are available on this system."
+            valid_languages = ['eng']  # Fallback to English
         
         # Join selected languages with '+'
         lang_string = '+'.join(valid_languages)
         
-        # Extract text using pytesseract
-        text = pytesseract.image_to_string(thresh, lang=lang_string)
+        # Get preprocessed images
+        processed_images = preprocess_image(image)
         
-        return text.strip()
+        # Try different OCR configurations
+        ocr_configs = [
+            '--psm 3',  # Fully automatic page segmentation (default)
+            '--psm 6',  # Uniform block of text
+            '--psm 4',  # Single column of text
+            '--psm 1',  # Automatic page segmentation with OSD
+            '--psm 11', # Sparse text
+            '--psm 12', # Sparse text with OSD
+        ]
+        
+        all_results = []
+        
+        # Try each preprocessing method with different PSM modes
+        for method_name, processed_img in processed_images:
+            for config in ocr_configs:
+                try:
+                    # Convert numpy array back to PIL Image for pytesseract
+                    pil_img = Image.fromarray(processed_img)
+                    
+                    # Extract text with current configuration
+                    text = pytesseract.image_to_string(pil_img, lang=lang_string, config=config)
+                    
+                    if text.strip() and len(text.strip()) > 5:  # Only add meaningful results
+                        all_results.append({
+                            'method': method_name,
+                            'config': config,
+                            'text': text.strip(),
+                            'length': len(text.strip()),
+                            'word_count': len(text.strip().split())
+                        })
+                except:
+                    continue
+        
+        if not all_results:
+            return "No text could be extracted from the image."
+        
+        # Sort results by word count and length (more comprehensive text is better)
+        all_results.sort(key=lambda x: (x['word_count'], x['length']), reverse=True)
+        
+        # Return the best result (most comprehensive)
+        best_result = all_results[0]['text']
+        
+        # Optional: Show which method worked best in debug
+        # st.info(f"Best result from: {all_results[0]['method']} with {all_results[0]['config']}")
+        
+        return best_result
     
     except Exception as e:
         return f"Error extracting text: {str(e)}"
@@ -267,14 +340,72 @@ def main():
     
     # Footer with instructions
     st.markdown("---")
-    st.markdown("### 💡 Tips for Better Results:")
+    st.markdown("### 💡 Tips for Better OCR Results:")
     st.markdown("""
-    - Use high-resolution images with clear text
-    - Ensure good contrast between text and background
-    - Select the correct languages for your image
-    - Avoid blurry or skewed images
-    - For best results, use images with horizontal text
+    - **Image Quality**: Use high-resolution images (300+ DPI) with clear, sharp text
+    - **Contrast**: Ensure good contrast between text and background (black text on white background works best)
+    - **Language Selection**: Select the correct languages present in your image
+    - **Text Orientation**: Horizontal text works best - rotate skewed images before uploading
+    - **Image Format**: PNG and TIFF formats often work better than JPG
+    - **Text Size**: Very small text (< 12pt) may not be recognized well
+    - **Fonts**: Simple, clean fonts work better than decorative or handwritten text
+    - **Lighting**: Avoid shadows, glare, or uneven lighting in photos
     """)
+    
+    # Advanced tips
+    with st.expander("🔧 Advanced OCR Tips"):
+        st.markdown("""
+        **The app automatically tries multiple preprocessing techniques:**
+        - Original image processing
+        - OTSU thresholding for better contrast
+        - Adaptive thresholding for varying lighting
+        - Morphological operations to clean up noise
+        - Contrast enhancement (CLAHE)
+        - Noise removal with median filtering
+        
+        **Multiple OCR modes are tested:**
+        - PSM 3: Full automatic page segmentation (default)
+        - PSM 6: Uniform block of text
+        - PSM 4: Single column of text
+        - PSM 1: Automatic with orientation detection
+        - PSM 11 & 12: Sparse text detection
+        
+        **If OCR is still not working well:**
+        - Try cropping to focus on specific text areas
+        - Increase image resolution before uploading
+        - Ensure text is not rotated or skewed
+        - Check if the language pack is installed
+        """)
+    
+    # Technical information
+    with st.expander("ℹ️ Technical Information"):
+        st.markdown(f"""
+        **OCR Engine:** Tesseract {version_or_error if tesseract_working else 'Not Available'}
+        
+        **Available Languages:** {len(LANGUAGES)} out of {len(ALL_LANGUAGES)} supported
+        
+        **Image Processing:** OpenCV with multiple preprocessing techniques
+        
+        **Supported Formats:** PNG, JPG, JPEG, TIFF, BMP, GIF
+        
+        **Processing Pipeline:**
+        1. Image format conversion and color space adjustment
+        2. Multiple preprocessing techniques applied
+        3. Various OCR page segmentation modes tested
+        4. Best result selected based on text length and word count
+        """)
+        
+        if tesseract_working:
+            available_lang_names = [name for name, code in ALL_LANGUAGES.items() 
+                                   if code in available_tesseract_langs]
+            st.write("**Available Languages:**")
+            st.write(", ".join(available_lang_names))
+            
+            missing_lang_names = [name for name, code in ALL_LANGUAGES.items() 
+                                 if code not in available_tesseract_langs]
+            if missing_lang_names:
+                st.write("**Missing Languages:**")
+                st.write(", ".join(missing_lang_names))
     
     # Technical info
     with st.expander("🔧 Technical Information"):
